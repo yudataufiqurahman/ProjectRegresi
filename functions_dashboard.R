@@ -1,5 +1,5 @@
 # ============================================================
-# FUNCTIONS DASHBOARD  (pelengkap functions_regresi_ccpp.R)
+# FUNCTIONS DASHBOARD (pelengkap functions_regresi_ccpp.R)
 # - loader data CCPP + fallback simulasi
 # - cache hasil analisis
 # - membangun ulang model terpilih (persamaan, grafik, diagnostik)
@@ -16,7 +16,7 @@ VAR_INFO <- data.frame(
   Variabel  = c("AT", "V", "AP", "RH", "PE"),
   Arti      = c("Ambient Temperature", "Exhaust Vacuum", "Ambient Pressure",
                 "Relative Humidity", "Net hourly electrical energy output"),
-  Satuan    = c("\u00b0C", "cm Hg", "mbar", "%", "MW"),
+  Satuan    = c("°C", "cm Hg", "mbar", "%", "MW"),
   Peran     = c("Prediktor", "Prediktor", "Prediktor", "Prediktor", "Target"),
   stringsAsFactors = FALSE
 )
@@ -70,6 +70,11 @@ cap_rows <- function(df, max_rows = MAX_ROWS_PER_SHEET, seed = 42) {
   list(data = df[idx, , drop = FALSE], capped = TRUE, n_used = max_rows, n_total = nrow(df))
 }
 
+# KONSISTENSI dengan app_improved.R:
+# - validate_ccpp_data & make_train_test_split dipanggil langsung
+# - tidak perlu wrapper run_full_analysis() yang custom di sini
+# - run_polynomial, run_elasticnet, run_gam dipanggil via hook di app
+
 # ------------------------------------------------------------
 # 1. Loader data CCPP (+ fallback simulasi)
 # ------------------------------------------------------------
@@ -88,9 +93,6 @@ find_ccpp_files <- function(dirs = c(".", "data")) {
 simulate_ccpp <- function(n = 1200, n_sheets = 3, seed = 2024) {
   set.seed(seed)
   AT <- stats::runif(n, 2, 37)
-  # Noise dibuat cukup besar agar prediktor tidak nyaris deterministik
-  # terhadap AT (concurvity tinggi dapat membuat pencarian smoothing
-  # parameter GAM tidak stabil / lambat konvergen).
   V  <- pmin(pmax(28 + 0.85 * AT + stats::rnorm(n, 0, 13), 25.4), 81.6)
   AP <- pmin(pmax(1019 - 0.25 * AT + stats::rnorm(n, 0, 8), 993), 1033)
   RH <- pmin(pmax(88 - 0.55 * AT + stats::rnorm(n, 0, 16), 26), 100)
@@ -156,18 +158,11 @@ save_cached_analysis <- function(result, signature) {
   }, error = function(e) FALSE)
 }
 
-# GAM versi ringan (basis lebih kecil, grid lambda lebih pendek) -- dipakai
-# HANYA sebagai fallback darurat bila run_gam() standar melewati batas
-# waktu pada kombinasi fold/lambda yang numerik sulit konvergen.
 GAM_FALLBACK_LAMBDA <- 10^seq(-2, 2, length.out = 5)
 GAM_FALLBACK_K <- 8
+GAM_FIT_TIMEOUT_SEC <- 15
 
 gam_unavailable_result <- function(Xtr, ytr, Xte, yte, folds, reason = "Timeout") {
-  # Lapis darurat terakhir: regresi linear biasa (selalu cepat & konvergen)
-  # dipakai sebagai pengganti sementara GAM HANYA jika kedua percobaan GAM
-  # (standar & ringan) sama-sama melewati batas waktu. Ini menjaga struktur
-  # data tetap valid (tidak ada NA) sehingga ANOVA/agregasi lintas-sheet
-  # lintas-model tidak crash; UI menandai sheet ini sebagai "GAM \u2192 fallback linear".
   n <- length(ytr)
   fit <- fit_linear_matrix(Xtr, ytr)
   co <- fit$coefficients; co[is.na(co)] <- 0
@@ -194,106 +189,23 @@ gam_unavailable_result <- function(Xtr, ytr, Xte, yte, folds, reason = "Timeout"
        cv_fold_rmse = fold_rmse, degraded = TRUE, error = reason)
 }
 
-# run_full_analysis() dengan callback progres + pengaman waktu 3-lapis KHUSUS
-# untuk GAM (satu-satunya model yang terbukti sesekali sangat lambat/macet
-# konvergen pada kondisi numerik tertentu -- lihat catatan di atas):
-#   1) coba pengaturan standar di SUBPROCESS terpisah (fidelitas penuh),
-#   2) bila subprocess melewati GAM_FIT_TIMEOUT_SEC -> subprocess dibunuh
-#      bersih (tanpa efek samping ke proses utama) & dicoba ulang dengan
-#      basis lebih kecil (GAM_FALLBACK_K/GAM_FALLBACK_LAMBDA),
-#   3) bila fallback pun timeout -> pakai regresi linear sbg pengganti
-#      sementara utk sheet itu saja; sisa dashboard tetap berjalan normal.
-# Polynomial & Elastic Net dijalankan langsung di proses utama (in-process)
-# karena terbukti selalu cepat (<2 detik) pada seluruh pengujian.
-GAM_FIT_TIMEOUT_SEC <- 15
-
-# Fungsi bersama: jalankan GAM dengan pengaman waktu 3-lapis, dipakai baik
-# oleh analisis CCPP multi-sheet (Page 2 & 3) maupun auto-analysis dataset
-# unggahan pengguna (Page 5). on_note() dipanggil dengan pesan singkat
-# setiap kali terjadi penurunan tingkat (untuk progress bar UI).
 run_gam_protected <- function(Xtr, ytr, Xte, yte, folds, on_note = function(msg) NULL,
                               timeout_sec = GAM_FIT_TIMEOUT_SEC, ...) {
   args <- list(Xtr = Xtr, ytr = ytr, Xte = Xte, yte = yte, folds = folds, ...)
   res <- run_in_subprocess("run_gam", args, timeout_sec = timeout_sec)
   status <- "ok"
   if (is.null(res)) {
-    on_note("GAM (mode ringan \u2013 konvergensi standar lambat)")
+    on_note("GAM (mode ringan – konvergensi standar lambat)")
     args2 <- args; args2$lambda_grid <- GAM_FALLBACK_LAMBDA; args2$k_spline <- GAM_FALLBACK_K
     res <- run_in_subprocess("run_gam", args2, timeout_sec = timeout_sec)
     status <- "light_fallback"
   }
   if (is.null(res)) {
-    on_note("GAM \u2192 fallback regresi linear (kendala numerik)")
+    on_note("GAM → fallback regresi linear (kendala numerik)")
     res <- gam_unavailable_result(Xtr, ytr, Xte, yte, folds, reason = "Timeout ganda")
     status <- "linear_fallback"
   }
   attr(res, "gam_status") <- status
-  res
-}
-
-run_full_analysis_progress <- function(data_sheets, on_step = function(msg, frac) NULL, ...) {
-  n_total <- 3 * length(data_sheets)
-  counter <- new.env(); counter$i <- 0
-  fallback_sheets <- character(0)
-  failed_sheets <- character(0)
-  sheet_names <- names(data_sheets)
-
-  step <- function(label) {
-    sheet_no <- counter$i %/% 3 + 1
-    on_step(sprintf("Sheet %d/%d \u2013 %s", sheet_no, length(data_sheets), label),
-            counter$i / n_total)
-    counter$i <<- counter$i + 1
-    sheet_no
-  }
-
-  wrap_inprocess <- function(fn, label) {
-    force(fn); force(label)
-    function(...) { step(label); fn(...) }
-  }
-
-  wrap_gam <- function(...) {
-    args <- list(...)
-    names(args)[1:5] <- c("Xtr", "ytr", "Xte", "yte", "folds")
-    sheet_no <- step("GAM")
-    sheet_nm <- if (!is.null(sheet_names)) sheet_names[sheet_no] else as.character(sheet_no)
-
-    res <- run_gam_protected(args$Xtr, args$ytr, args$Xte, args$yte, args$folds,
-      on_note = function(m) on_step(sprintf("Sheet %d/%d \u2013 %s", sheet_no, length(data_sheets), m),
-                                    (counter$i - 1) / n_total))
-    st <- attr(res, "gam_status")
-    if (identical(st, "light_fallback")) fallback_sheets[[length(fallback_sheets) + 1]] <<- sheet_nm
-    if (identical(st, "linear_fallback")) failed_sheets[[length(failed_sheets) + 1]] <<- sheet_nm
-    res
-  }
-
-  hook <- new.env(parent = environment(run_full_analysis))
-  hook$run_polynomial <- wrap_inprocess(run_polynomial, "Polynomial")
-  hook$run_elasticnet <- wrap_inprocess(run_elasticnet, "Elastic Net")
-  hook$run_gam        <- wrap_gam
-  f <- run_full_analysis
-  environment(f) <- hook
-  result <- f(data_sheets, ...)
-  attr(result, "gam_fallback") <- fallback_sheets
-  attr(result, "model_failed") <- failed_sheets
-  result
-}
-
-# Titik masuk tunggal untuk analisis CCPP multi-sheet (dipakai Page 2 & 3):
-# 1) subsample setiap sheet ke MAX_ROWS_PER_SHEET agar performa terjaga,
-# 2) jalankan run_full_analysis_progress dengan pengaman waktu GAM,
-# 3) lampirkan info baris mana yang di-cap untuk transparansi ke pengguna.
-build_ccpp_analysis <- function(data_sheets, on_step = function(msg, frac) NULL,
-                                K = 10, seed = 42) {
-  capped <- lapply(data_sheets, cap_rows, max_rows = MAX_ROWS_PER_SHEET, seed = seed)
-  data_used <- stats::setNames(lapply(capped, `[[`, "data"), names(data_sheets))
-  cap_info <- dplyr::bind_rows(lapply(names(capped), function(sh) {
-    ci <- capped[[sh]]
-    data.frame(Sheet = sh, Baris_Digunakan = ci$n_used, Baris_Total = ci$n_total,
-              Disubsample = ci$capped, stringsAsFactors = FALSE)
-  }))
-  res <- run_full_analysis_progress(data_used, on_step = on_step, K = K, seed = seed)
-  res <- slim_analysis(res)
-  attr(res, "cap_info") <- cap_info
   res
 }
 
@@ -329,22 +241,22 @@ tuning_counts <- function(res, sheet, model, route) {
   if (model == "Polynomial") {
     cand <- nrow(obj$table)
     fits <- if (route == "AICc") cand else cand * K
-    note <- if (route == "AICc") "1 fit penuh per derajat" else sprintf("%d derajat \u00d7 %d fold", cand, K)
+    note <- if (route == "AICc") "1 fit penuh per derajat" else sprintf("%d derajat × %d fold", cand, K)
   } else if (model == "Elastic Net") {
     if (route == "AICc") {
       cand <- nrow(obj$table); fits <- cand
-      note <- "grid \u03bb \u00d7 rasio-L1, 1 fit penuh per kombinasi"
+      note <- "grid λ × rasio-L1, 1 fit penuh per kombinasi"
     } else {
       cand <- nrow(obj$cv_grid); fits <- cand * K
-      note <- sprintf("%d kombinasi \u00d7 %d fold (cv.glmnet)", cand, K)
+      note <- sprintf("%d kombinasi × %d fold (cv.glmnet)", cand, K)
     }
   } else {
     if (route == "AICc") {
       cand <- 1; fits <- 1
-      note <- "\u03bb dioptimasi otomatis oleh GCV.Cp"
+      note <- "λ dioptimasi otomatis oleh GCV.Cp"
     } else {
       cand <- nrow(obj$table); fits <- cand * K
-      note <- sprintf("%d \u03bb \u00d7 %d fold", cand, K)
+      note <- sprintf("%d λ × %d fold", cand, K)
     }
   }
   list(candidates = cand, fits = fits, note = note)
@@ -355,9 +267,9 @@ tuning_counts <- function(res, sheet, model, route) {
 # ------------------------------------------------------------
 pretty_term <- function(nm) {
   nm <- gsub("\\^1(?![0-9])", "", nm, perl = TRUE)
-  nm <- gsub("\\^2", "\u00b2", nm)
-  nm <- gsub("\\^3", "\u00b3", nm)
-  gsub(":", "\u00b7", nm)
+  nm <- gsub("\\^2", "²", nm)
+  nm <- gsub("\\^3", "³", nm)
+  gsub(":", "·", nm)
 }
 
 fmt_coef <- function(x) {
@@ -368,14 +280,14 @@ build_equation <- function(target, intercept, term_names, coefs, max_terms = 12)
   keep <- which(abs(coefs) > 1e-12)
   ord <- keep[order(abs(coefs[keep]), decreasing = TRUE)]
   shown <- ord[seq_len(min(length(ord), max_terms))]
-  lines <- sprintf("%s = %s%s", target, ifelse(intercept < 0, "\u2212", ""), fmt_coef(intercept))
+  lines <- sprintf("%s = %s%s", target, ifelse(intercept < 0, "−", ""), fmt_coef(intercept))
   for (i in shown) {
-    lines <- c(lines, sprintf("     %s %s\u00b7%s",
-                              ifelse(coefs[i] >= 0, "+", "\u2212"),
+    lines <- c(lines, sprintf("     %s %s·%s",
+                              ifelse(coefs[i] >= 0, "+", "−"),
                               fmt_coef(coefs[i]), term_names[i]))
   }
   if (length(ord) > length(shown)) {
-    lines <- c(lines, sprintf("     + \u2026 (%d suku lain, lihat tabel koefisien)", length(ord) - length(shown)))
+    lines <- c(lines, sprintf("     + … (%d suku lain, lihat tabel koefisien)", length(ord) - length(shown)))
   }
   paste(lines, collapse = "\n")
 }
@@ -444,7 +356,6 @@ gam_fit_build <- function(Xtr, ytr, route, obj, k_spline = 20) {
        predict = function(Xn) as.numeric(stats::predict(m, newdata = Xn[, feats, drop = FALSE])))
 }
 
-# obj = hasil run_* untuk satu sheet; route = "AICc" / "CV"
 build_predictor <- function(model, route, obj, Xtr, ytr, k_spline = 20) {
   key <- route_key(route)
   if (model == "Polynomial") {
@@ -459,7 +370,6 @@ build_predictor <- function(model, route, obj, Xtr, ytr, k_spline = 20) {
   }
 }
 
-# Persamaan (teks + tabel koefisien) dari predictor
 describe_predictor <- function(pr, target) {
   if (pr$model == "Polynomial") {
     co <- pr$coef
@@ -487,7 +397,7 @@ describe_predictor <- function(pr, target) {
     list(eq_std = build_equation(target, b[1], paste0("z_", names(b)[-1]), unname(b[-1])),
          eq_orig = build_equation(target, o$b0, names(b)[-1], o$beta),
          table = tab,
-         note = sprintf("\u03bb = %.5g, rasio L1 = %.2f. Koefisien yang diciutkan menjadi nol berarti variabel dieliminasi.",
+         note = sprintf("λ = %.5g, rasio L1 = %.2f. Koefisien yang diciutkan menjadi nol berarti variabel dieliminasi.",
                         pr$lambda, pr$alpha))
   } else {
     if (isTRUE(pr$degraded)) {
@@ -505,15 +415,14 @@ describe_predictor <- function(pr, target) {
                       stringsAsFactors = FALSE)
     intercept <- unname(stats::coef(pr$gam)[1])
     smooths <- paste(sprintf("s(%s)", pr$features), collapse = " + ")
-    list(eq_std = sprintf("%s = %s%s + %s\n\ndengan s(\u00b7) = penalized regression spline, \u03bb (smoothing) = %.4g",
-                          target, ifelse(intercept < 0, "\u2212", ""), fmt_coef(intercept), smooths, pr$lambda),
+    list(eq_std = sprintf("%s = %s%s + %s\n\ndengan s(·) = penalized regression spline, λ (smoothing) = %.4g",
+                          target, ifelse(intercept < 0, "−", ""), fmt_coef(intercept), smooths, pr$lambda),
          eq_orig = NULL, table = tab,
          note = sprintf("Total EDF = %.2f. EDF mendekati 1 berarti hubungan hampir linear; EDF besar berarti sangat non-linear.",
                         sum(pr$gam$edf)))
   }
 }
 
-# Grid efek parsial: satu prediktor bervariasi, sisanya di rata-rata
 partial_grid <- function(Xtr, feature, n = 80) {
   rng <- range(Xtr[[feature]], na.rm = TRUE)
   g <- as.data.frame(lapply(Xtr, function(x) rep(mean(x, na.rm = TRUE), n)))
@@ -558,7 +467,6 @@ sim_generate <- function(type, n, noise, seed, test_frac = 0.3) {
        grid = grid, truth = sim_truth(type, grid$x), type = type)
 }
 
-# Setiap fit_*1d mengembalikan list(predict = function(x) data.frame(fit, se), k, label)
 fit_poly1d <- function(train, degree) {
   degree <- max(1L, min(as.integer(degree), length(unique(train$x)) - 2L))
   m <- stats::lm(stats::as.formula(sprintf("y ~ poly(x, %d)", degree)), data = train)
@@ -578,7 +486,7 @@ fit_en1d <- function(train, degree, alpha, loglam) {
                         standardize = TRUE, intercept = TRUE)
   k <- as.numeric(fit$df) + 1
   list(k = k,
-       label = sprintf("Elastic Net (basis deg %d, \u03b1=%.2f)", degree, alpha),
+       label = sprintf("Elastic Net (basis deg %d, α=%.2f)", degree, alpha),
        predict = function(x) {
          Bn <- strip(stats::predict(B, x))
          data.frame(fit = as.numeric(stats::predict(fit, newx = Bn, s = lam)), se = NA_real_)
@@ -591,7 +499,7 @@ fit_gam1d <- function(train, k, auto, loglam) {
   m <- if (isTRUE(auto)) mgcv::gam(f, data = train, method = "GCV.Cp")
        else mgcv::gam(f, data = train, method = "GCV.Cp", sp = 10^loglam)
   list(k = sum(m$edf), sp = m$sp,
-       label = sprintf("GAM (k=%d, \u03bb=%.3g)", k, m$sp),
+       label = sprintf("GAM (k=%d, λ=%.3g)", k, m$sp),
        predict = function(x) {
          p <- stats::predict(m, newdata = data.frame(x = x), se.fit = TRUE)
          data.frame(fit = as.numeric(p$fit), se = as.numeric(p$se.fit))
