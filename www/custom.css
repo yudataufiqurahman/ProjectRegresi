@@ -1,0 +1,92 @@
+/* ProjectRegresi modern visual system */
+:root {
+  --pr-primary: #6366f1;
+  --pr-primary-dark: #4f46e5;
+  --pr-ink: #0f172a;
+  --pr-muted: #64748b;
+  --pr-surface: #ffffff;
+  --pr-background: #f8fafc;
+  --pr-border: rgba(15, 23, 42, .08);
+  --pr-radius: 16px;
+}
+
+body {
+  background: var(--pr-background);
+  color: var(--pr-ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  letter-spacing: -0.01em;
+}
+
+.navbar {
+  min-height: 64px;
+  border-bottom: 1px solid var(--pr-border);
+  box-shadow: 0 4px 18px rgba(15, 23, 42, .05);
+}
+
+.navbar-brand { font-weight: 800; letter-spacing: -.03em; }
+.nav-link { font-weight: 600; transition: color .2s ease, background .2s ease; }
+.nav-link:hover { color: var(--pr-primary-dark) !important; }
+
+.card, .bslib-card, .value-box {
+  border: 1px solid var(--pr-border) !important;
+  border-radius: var(--pr-radius) !important;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .045) !important;
+  overflow: hidden;
+}
+
+.card-header {
+  background: transparent !important;
+  border-bottom: 1px solid var(--pr-border) !important;
+  font-weight: 750;
+  padding: 1rem 1.15rem;
+}
+
+.bslib-sidebar-layout > .sidebar { border-right: 1px solid var(--pr-border); }
+.form-control, .form-select, .selectize-input, .selectize-control.single .selectize-input {
+  border-radius: 10px !important;
+  border-color: #dbe3ef !important;
+  min-height: 42px;
+}
+
+.btn { border-radius: 10px; font-weight: 650; transition: transform .15s ease, box-shadow .15s ease; }
+.btn-primary { background: var(--pr-primary); border-color: var(--pr-primary); }
+.btn-primary:hover { background: var(--pr-primary-dark); border-color: var(--pr-primary-dark); transform: translateY(-1px); box-shadow: 0 5px 14px rgba(99, 102, 241, .25); }
+
+.value-box .value-box-value { font-weight: 800; letter-spacing: -.04em; }
+.table { --bs-table-bg: transparent; }
+.dataTables_wrapper { padding: .25rem; }
+
+.eq-box {
+  background: linear-gradient(135deg, #111827, #1e293b);
+  color: #e2e8f0;
+  border-radius: 12px;
+  padding: 1rem 1.15rem;
+  font-family: "Fira Code", Consolas, monospace;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.plotly html-widget { border-radius: 12px; }
+.alert { border: 0; border-radius: 12px; }
+
+/* A compact mobile layout without changing any page functionality. */
+@media (max-width: 768px) {
+  .navbar-brand { font-size: 1rem; }
+  .card, .bslib-card { border-radius: 12px !important; }
+  .bslib-sidebar-layout > .sidebar { border-right: 0; border-bottom: 1px solid var(--pr-border); }
+  .value-box { min-height: 104px; }
+}
+
+/* Optional dark appearance, toggled by the helper in scripts.js. */
+body.pr-dark {
+  --pr-ink: #e5e7eb;
+  --pr-muted: #94a3b8;
+  --pr-surface: #111827;
+  --pr-background: #0b1120;
+  --pr-border: rgba(148, 163, 184, .18);
+  background: var(--pr-background);
+}
+body.pr-dark .card, body.pr-dark .bslib-card, body.pr-dark .value-box,
+body.pr-dark .navbar, body.pr-dark .sidebar { background: var(--pr-surface) !important; color: var(--pr-ink); }
+body.pr-dark .card-header { color: var(--pr-ink); }
+body.pr-dark .form-control, body.pr-dark .form-select, body.pr-dark .selectize-input { background: #172033; color: var(--pr-ink); }
